@@ -1,0 +1,7 @@
+{
+  "v": 1,
+  "alg": "AES-256-GCM",
+  "kdf": "PBKDF2-HMAC-SHA256",
+  "iterations": 210000,
+  "salt": "YOZyEw3XAO59hpPpvvjaIQ=="
+}
