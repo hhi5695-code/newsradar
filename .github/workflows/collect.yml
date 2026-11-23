@@ -12,7 +12,7 @@ on:
         required: false
         type: string
       backfill:
-        description: "2026-01-02부터 오늘까지 빠진 거래일을 채움"
+        description: "빠진 거래일을 채우고, 2026-01-02부터 저장된 상한가의 테마를 다시 나눔"
         required: false
         type: boolean
         default: false
@@ -93,7 +93,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add site/data
+          git add site/data audit/theme-regroup.md
           if git diff --staged --quiet; then
             echo "변경 없음"
           else

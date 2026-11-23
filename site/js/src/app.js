@@ -140,22 +140,29 @@ function stockButton(row, extra) {
     ? `<a href="${escapeHtml(row.sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.source || "기사")}</a>`
     : `<span>${escapeHtml(row.source || "")}</span>`;
   const tag = row.aboveWeekly240 ? `<span class="tag on">주봉240</span>` : "";
+  const inferred = row.inferred ? `<span class="tag infer">추정</span>` : "";
   return `<li><button type="button" class="stock" data-code="${escapeHtml(row.code)}">
-    <div class="row"><b>${escapeHtml(row.name)}</b><span class="mkt">${MARKET[row.market] || ""}</span>${tag}<span class="rate">${rate(row.changeRate)}</span></div>
+    <div class="row"><b>${escapeHtml(row.name)}</b><span class="mkt">${MARKET[row.market] || ""}</span>${tag}${inferred}<span class="rate">${rate(row.changeRate)}</span></div>
     <p class="${reasonClass}">${escapeHtml(row.reason || "이유 미확인")}</p>
     <div class="meta"><span>${escapeHtml(extra || row.code)}</span>${source}</div>
   </button></li>`;
 }
 
+function themeHead(theme, open) {
+  const inferred = theme.inferredStocks ? `<span class="tag infer">추정 ${theme.inferredStocks}</span>` : "";
+  return `<button type="button" class="head" data-toggle="1" aria-expanded="${open ? "true" : "false"}">
+      <span class="num">${escapeHtml(theme.id)}</span>
+      <h2>${escapeHtml(theme.name)}</h2>
+      ${inferred}
+      <span class="size ${SIZE_LABEL[theme.size] || "size-sm"}">${escapeHtml(theme.size)}</span>
+      <span class="count">${theme.stockCount}종목</span>
+    </button>`;
+}
+
 function themeBlock(theme, rows, open) {
   const list = rows.map((row) => stockButton(row, `${row.code}`)).join("");
   return `<section class="theme">
-    <button type="button" class="head" data-toggle="1" aria-expanded="${open ? "true" : "false"}">
-      <span class="num">${escapeHtml(theme.id)}</span>
-      <h2>${escapeHtml(theme.name)}</h2>
-      <span class="size ${SIZE_LABEL[theme.size] || "size-sm"}">${escapeHtml(theme.size)}</span>
-      <span class="count">${theme.stockCount}종목</span>
-    </button>
+    ${themeHead(theme, open)}
     <ul class="stocks" ${open ? "" : "hidden"}>${list}</ul>
   </section>`;
 }
@@ -168,7 +175,7 @@ function toolbar(placeholder) {
     </div>
   </div>
   <details class="note"><summary>대 · 중 · 소 기준</summary>
-    이번 달 그 테마에 들어간 상한가 종목 수입니다. 대는 3개 이상이고 그중 하나 이상이 주봉 240선 위이거나 그 선을 돌파한 경우, 중은 2개이거나 3개 이상이지만 주봉 240선 위/돌파가 없는 경우, 소는 1개입니다. 같은 달의 같은 이유만 한 테마로 모이고, 다음 달에는 번호가 다시 시작됩니다.
+    이번 달 그 테마에 들어간 상한가 종목 수입니다. 대는 3개 이상이고 그중 하나 이상이 주봉 240선 위이거나 그 선을 돌파한 경우, 중은 2개이거나 3개 이상이지만 주봉 240선 위/돌파가 없는 경우, 소는 1개입니다. 비슷한 이유와 같은 업종은 한 테마로 모이고, 다음 달에는 번호가 다시 시작됩니다. 뉴스가 없는 종목은 이유 문장을 만들지 않습니다. 테마만 추정한 경우 추정이라고 표시하며, 그 종목도 테마 수에 포함됩니다.
   </details>`;
 }
 
@@ -257,12 +264,7 @@ async function renderCalendar() {
     const visible = themeHit ? rows : rows.filter((row) => matches(`${row.name} ${row.code} ${row.reason}`));
     const list = visible.map((row) => stockButton(row, row.date)).join("");
     return `<section class="theme">
-      <button type="button" class="head" data-toggle="1" aria-expanded="false">
-        <span class="num">${escapeHtml(theme.id)}</span>
-        <h2>${escapeHtml(theme.name)}</h2>
-        <span class="size ${SIZE_LABEL[theme.size] || "size-sm"}">${escapeHtml(theme.size)}</span>
-        <span class="count">${theme.stockCount}종목</span>
-      </button>
+      ${themeHead(theme, false)}
       <ul class="stocks" hidden>${list}</ul>
     </section>`;
   }).join("");

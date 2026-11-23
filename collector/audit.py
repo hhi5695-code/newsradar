@@ -49,7 +49,7 @@ from collect import (  # noqa: E402
     load_config,
 )
 from limits import exclusion_reason, is_limit_up, limit_up_status  # noqa: E402
-from themes import REASON_MISSING, group_month  # noqa: E402
+from themes import REASON_MISSING, canonical_key, classify_text, group_month  # noqa: E402
 
 START = "2026-01-02"
 KRX_CACHE_FROM = "2026-03-08"
@@ -483,32 +483,40 @@ def theme_violations(events: list[dict], config: dict, trading_days: list[str]) 
         seen_key = {}
         for ident, theme_id in theme_of.items():
             row = originals[ident]
-            hint = row.get("themeHint") or {}
-            if row.get("reasonFound") and hint.get("type") == "dict" and hint.get("key"):
-                previous = seen_key.get(hint["key"])
+            if not row.get("reasonFound"):
+                continue
+            text = "\n".join(part for part in (row.get("reason"), row.get("sourceTitle")) if part and part != REASON_MISSING)
+            classified = classify_text(text, row.get("name") or "") if text else None
+            key = classified["key"] if classified else canonical_key((row.get("themeHint") or {}).get("key"))
+            if key:
+                previous = seen_key.get(key)
                 if previous and previous != theme_id:
-                    problems.append(f"{month_id} 같은 테마 키 {hint['key']}가 {previous}와 {theme_id}로 갈라짐")
-                seen_key[hint["key"]] = theme_id
-            if row.get("reasonFound"):
-                text = "".join((row.get("reason") or "").split())
-                previous = seen_reason.get(text)
-                if text and previous and previous != theme_id:
-                    problems.append(f"{month_id} 같은 이유가 {previous}와 {theme_id}로 갈라짐")
-                if text:
-                    seen_reason[text] = theme_id
+                    problems.append(f"{month_id} 같은 테마 키 {key}가 {previous}와 {theme_id}로 갈라짐")
+                seen_key[key] = theme_id
+            reason_text = "".join((row.get("reason") or "").split())
+            previous = seen_reason.get(reason_text)
+            if reason_text and reason_text != "".join(REASON_MISSING.split()) and previous and previous != theme_id:
+                problems.append(f"{month_id} 같은 이유가 {previous}와 {theme_id}로 갈라짐")
+            if reason_text:
+                seen_reason[reason_text] = theme_id
         keys_in_theme = defaultdict(set)
         for ident, theme_id in theme_of.items():
             row = originals[ident]
-            hint = row.get("themeHint") or {}
-            if row.get("reasonFound") and hint.get("type") == "dict" and hint.get("key"):
-                keys_in_theme[theme_id].add(hint["key"])
+            if not row.get("reasonFound"):
+                continue
+            text = "\n".join(part for part in (row.get("reason"), row.get("sourceTitle")) if part and part != REASON_MISSING)
+            classified = classify_text(text, row.get("name") or "") if text else None
+            key = classified["key"] if classified else canonical_key((row.get("themeHint") or {}).get("key"))
+            if key:
+                keys_in_theme[theme_id].add(key)
         for theme_id, keys in keys_in_theme.items():
             if len(keys) > 1:
                 problems.append(f"{month_id} {theme_id}에 서로 다른 테마 키가 섞임: {', '.join(sorted(keys))}")
-        unknown_events = [ident for ident, row in originals.items() if not row.get("reasonFound")]
-        unknown_ids = {theme_of[ident] for ident in unknown_events}
-        if unknown_events and len(unknown_ids) != len(unknown_events):
-            problems.append(f"{month_id} 이유 미확인 {len(unknown_events)}건이 테마 {len(unknown_ids)}개로 합쳐짐")
+        for theme in grouped["themes"]:
+            for stock in theme["stocks"]:
+                for event in stock["events"]:
+                    if event.get("inferred") and (event.get("reason") != REASON_MISSING or event.get("reasonFound")):
+                        problems.append(f"{month_id} 추정 종목의 이유 문장이 바뀜")
     return problems
 
 
@@ -522,7 +530,7 @@ def render_report(payload: dict) -> str:
         "",
         "상장 첫날은 공모가의 400%를 상한으로 본다. 거래량 0은 거래정지로 보고 상한가에서 뺀다. 코넥스, 우선주, 스팩, ETF, ETN은 제외한다. 고가만 상한가이고 종가는 아닌 경우는 상한가로 세지 않는다.",
         "",
-        "이유는 그날(또는 전 거래일 15:30 이후)의 기사·공시에서 문장을 그대로 가져온다. 문장을 만들지 않는다. 근거가 없으면 이유 미확인이며, 그 종목은 서로 테마로 합치지 않는다.",
+        "이유는 그날(또는 전 거래일 15:30 이후)의 기사·공시에서 문장을 그대로 가져온다. 문장을 만들지 않는다. 근거가 없으면 이유 미확인이다. 그 종목의 테마는 업종, 같은 날·가까운 날의 상한가, 최근 테마로 추정할 수 있다.",
         "",
         "## 월별 상한가",
         "",
@@ -552,7 +560,7 @@ def render_report(payload: dict) -> str:
         for problem in payload["themeProblems"]:
             lines.append(f"- {problem}")
     else:
-        lines.append("같은 달에서 같은 이유·같은 테마 키는 한 번호로 모이고, 다른 키는 섞이지 않았다. 이유 미확인은 종목마다 따로 두었다.")
+        lines.append("같은 달에서 같은 업종·비슷한 이유는 한 번호로 모였다. 이유 문장이 없는 종목은 테마만 추정하고, 문장은 이유 미확인으로 두었다.")
     lines += [
         "",
         "## 수집 실패",

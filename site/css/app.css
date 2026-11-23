@@ -81,7 +81,7 @@ a { color: var(--mid); }
   background: var(--bg-2); border: 1px solid var(--line); border-radius: 16px; margin-bottom: 12px; overflow: hidden;
 }
 .theme > button.head, .theme .head {
-  width: 100%; text-align: left; display: flex; gap: 8px; align-items: center;
+  width: 100%; text-align: left; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   padding: 14px; background: transparent; border: 0;
 }
 .num { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 42px; font-weight: 700; }
@@ -106,6 +106,7 @@ a { color: var(--mid); }
   font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 6px;
 }
 .tag.on { color: var(--gold); border-color: #6d5820; }
+.tag.infer { color: #f0d48a; border-color: #6d5820; }
 .rate { margin-left: auto; color: var(--up); font-weight: 800; font-variant-numeric: tabular-nums; }
 .reason { margin: 6px 0 0; color: #d7dde6; font-size: 14px; line-height: 1.45; }
 .reason.missing { color: var(--muted); }

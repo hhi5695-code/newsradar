@@ -40,6 +40,38 @@ def test_ipo_band_and_halt() -> None:
     assert limit_up_status(4400, 5720, 5720, 0, "UPPER_LIMIT", False, 30) == "halt"
 
 
+def _event(code, day, reason, found=True, key=None, theme_name=None, signal=False, industry="", industry_code="", article=""):
+    hint_type = "dict" if key else ("unknown" if not found else "custom")
+    return {
+        "code": code,
+        "name": code,
+        "market": "KOSDAQ",
+        "date": day,
+        "close": 1000,
+        "prevClose": 800,
+        "changeRate": 30.0,
+        "reason": reason,
+        "reasonFound": found,
+        "source": "테스트" if found else "",
+        "sourceTitle": reason if found else "",
+        "sourceUrl": "https://example.test/a" if found else "",
+        "articleTitle": article,
+        "articleBody": "",
+        "weekly240Signal": signal,
+        "industry": industry,
+        "industryCode": industry_code,
+        "themeHint": {
+            "type": hint_type,
+            "key": key,
+            "name": theme_name or reason,
+            "keyword": theme_name,
+            "reason": reason,
+            "found": found,
+            "tokens": [],
+        },
+    }
+
+
 def test_unknowns_are_not_merged() -> None:
     def unknown(code, day):
         return {
@@ -83,6 +115,78 @@ def test_title_without_dictionary_is_still_a_reason() -> None:
     assert found
     assert "방중" in reason
     assert reason.replace("…", "") in title or reason.replace("…", "")[:12] in title
+
+
+def test_similar_wording_and_sector_share_a_theme() -> None:
+    grouped = group_month(
+        [
+            _event("000001", "2026-03-03", "HBM 수요 확대"),
+            _event("000002", "2026-03-18", "파운드리 증설 소식"),
+            _event("000003", "2026-03-04", "휴머노이드 양산"),
+            _event("000004", "2026-03-19", "산업용 로봇 공급"),
+            _event("000005", "2026-03-05", "방중 수행단 일정"),
+            _event("000006", "2026-03-06", "방중 기대 속 강세"),
+            _event("000007", "2026-03-07", "삼성 기대감"),
+            _event("000008", "2026-03-07", "삼성 발표"),
+        ],
+        2026,
+        3,
+        CONFIG,
+        ["2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06", "2026-03-07", "2026-03-18", "2026-03-19"],
+    )
+    names = {theme["name"]: theme["stockCount"] for theme in grouped["themes"]}
+    assert names["AI반도체"] == 2
+    assert names["로봇"] == 2
+    assert any(theme["stockCount"] == 2 and theme["name"] == "방중" for theme in grouped["themes"])
+    assert sum(1 for theme in grouped["themes"] if "삼성" in theme["name"]) == 2
+
+
+def test_missing_news_is_inferred_not_rewritten() -> None:
+    grouped = group_month(
+        [
+            _event("000001", "2026-04-01", "양극재 공급", industry="화학", industry_code="272"),
+            _event("000002", "2026-04-01", "이유 미확인", found=False, industry="화학", industry_code="272"),
+            _event("000003", "2026-04-01", "이유 미확인", found=False, industry="제약", industry_code="261"),
+            _event("000004", "2026-04-02", "이유 미확인", found=False, industry="제약", industry_code="261"),
+            _event("000005", "2026-04-03", "이유 미확인", found=False),
+        ],
+        2026,
+        4,
+        CONFIG,
+        ["2026-04-01", "2026-04-02", "2026-04-03"],
+        history={"000009": {"key": "ship", "name": "조선"}},
+    )
+    by_name = {theme["name"]: theme for theme in grouped["themes"]}
+    battery = by_name["2차전지"]
+    assert battery["stockCount"] == 2
+    inferred = next(stock for stock in battery["stocks"] if stock["code"] == "000002")
+    assert inferred["events"][0]["inferred"] is True
+    assert inferred["events"][0]["reason"] == "이유 미확인"
+    assert inferred["events"][0]["reasonFound"] is False
+    known = next(stock for stock in battery["stocks"] if stock["code"] == "000001")
+    assert known["events"][0]["inferred"] is False
+    assert known["events"][0]["reason"] == "양극재 공급"
+    bio = by_name["바이오"]
+    assert bio["stockCount"] == 2
+    assert bio["inferredStocks"] == 2
+    assert all(event["reason"] == "이유 미확인" for stock in bio["stocks"] for event in stock["events"])
+    leftovers = [theme for theme in grouped["themes"] if theme["name"] == "이유 미확인"]
+    assert len(leftovers) == 1
+    assert leftovers[0]["stockCount"] == 1
+    assert leftovers[0]["stocks"][0]["events"][0]["inferred"] is False
+
+    later = group_month(
+        [_event("000001", "2026-05-04", "이유 미확인", found=False)],
+        2026,
+        5,
+        CONFIG,
+        ["2026-05-04"],
+        history=grouped["groundedByCode"],
+    )
+    assert later["themes"][0]["name"] == "2차전지"
+    assert later["themes"][0]["stocks"][0]["events"][0]["inferred"] is True
+    assert later["themes"][0]["stocks"][0]["events"][0]["reason"] == "이유 미확인"
+    assert later["inferredStocks"] == 1
 
 
 def test_same_theme_key_is_not_split() -> None:
@@ -253,6 +357,8 @@ if __name__ == "__main__":
     test_listing_day_can_be_ordinary_limit()
     test_title_without_dictionary_is_still_a_reason()
     test_same_theme_key_is_not_split()
+    test_similar_wording_and_sector_share_a_theme()
+    test_missing_news_is_inferred_not_rewritten()
     test_unknowns_are_not_merged()
     test_exclusions()
     test_reason_is_copied()
