@@ -1,0 +1,111 @@
+name: 상한가 수집
+
+on:
+  schedule:
+    # 16:30 KST = 07:30 UTC. Korea has no daylight saving time.
+    # Once a day. There is no intraday polling.
+    - cron: "30 7 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "수집일 YYYY-MM-DD. 비우면 한국시간 오늘"
+        required: false
+        type: string
+      backfill:
+        description: "2026-01-02부터 오늘까지 빠진 거래일을 채움"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: limitup-collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Require SITE_PASSWORD
+        env:
+          SITE_PASSWORD: ${{ secrets.SITE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SITE_PASSWORD}" ]; then
+            echo "::error::SITE_PASSWORD 가 없습니다. 저장소 Settings → Secrets and variables → Actions → New repository secret 에서 이름 SITE_PASSWORD 로 암호를 저장한 뒤 이 워크플로를 다시 실행하세요. 평문 시세는 커밋하지 않습니다."
+            exit 1
+          fi
+
+      - name: Install collector dependencies
+        run: pip install -r collector/requirements.txt
+
+      - name: Collect limit-ups
+        env:
+          SITE_PASSWORD: ${{ secrets.SITE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "${{ inputs.backfill }}" = "true" ]; then
+            args+=(--backfill)
+          fi
+          if [ -n "${{ inputs.date }}" ]; then
+            args+=(--date "${{ inputs.date }}")
+          fi
+          python3 collector/collect.py "${args[@]}"
+
+      - name: Refuse plaintext market data
+        run: |
+          set -euo pipefail
+          if [ -d data/raw ] && find data/raw -type f | grep -q .; then
+            echo "::error::data/raw 에 평문 시세가 있습니다. 커밋을 중단합니다."
+            exit 1
+          fi
+          while IFS= read -r file; do
+            name="$(basename "$file")"
+            case "$name" in
+              config.json|crypto.json) ;;
+              *)
+                echo "::error::평문 파일은 커밋할 수 없습니다: $file"
+                exit 1
+                ;;
+            esac
+          done < <(find site/data -type f -name '*.json')
+          if [ ! -f site/data/crypto.json ]; then
+            echo "::error::site/data/crypto.json 이 없습니다. 암호화가 수행되지 않았습니다."
+            exit 1
+          fi
+
+      - name: Commit encrypted data
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add site/data
+          if git diff --staged --quiet; then
+            echo "변경 없음"
+          else
+            git commit -m "Collect encrypted KOSPI and KOSDAQ limit-up data"
+            git push
+          fi
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

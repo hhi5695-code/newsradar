@@ -1,0 +1,12 @@
+{
+  "startDate": "2026-01-02",
+  "timezone": "Asia/Seoul",
+  "priceLimitRatio": 0.3,
+  "largeMinCount": 3,
+  "mediumCount": 2,
+  "weeklyMaPeriod": 240,
+  "monthlyMaPeriod": 120,
+  "countBasis": "unique-stocks-in-theme-within-month",
+  "weekly240Rule": "위: 그 주 종가 > 240주 단순이평. 돌파: 직전 주 종가 <= 직전 240주선 이고 이번 주 고가 >= 이번 240주선. 하나라도 해당하면 주봉 240선 위/돌파. 240주가 안 쌓인 종목은 해당 없음.",
+  "sizeRule": "대 = 종목 수 >= largeMinCount 이고 그중 하나 이상이 주봉 240선 위/돌파. 중 = 종목 수 == mediumCount, 또는 종목 수 >= largeMinCount 이면서 주봉 240선 위/돌파가 없음. 소 = 종목 1개."
+}
