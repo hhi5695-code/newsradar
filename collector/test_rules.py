@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from charts import weekly_signal
 from limits import exclusion_reason, ipo_lower, ipo_upper, is_limit_up, limit_up_status, upper_limit
-from themes import extract_reason, group_month, hint_from_article, theme_size
+from themes import detail_cutoff, extract_reason, group_month, hint_from_article, issue_summary, theme_size
 
 CONFIG = {
     "largeMinCount": 3,
@@ -38,6 +38,38 @@ def test_ipo_band_and_halt() -> None:
     assert limit_up_status(4400, 5720, 5720, 10, "UPPER_LIMIT", False, 30) == "limit"
     assert limit_up_status(4400, 5720, 5700, 10, "", False, 29) == "touch"
     assert limit_up_status(4400, 5720, 5720, 0, "UPPER_LIMIT", False, 30) == "halt"
+
+
+def _event(code, day, reason, found=True, key=None, theme_name=None, signal=False, industry="", industry_code="", article=""):
+    hint_type = "dict" if key else ("unknown" if not found else "custom")
+    return {
+        "code": code,
+        "name": code,
+        "market": "KOSDAQ",
+        "date": day,
+        "close": 1000,
+        "prevClose": 800,
+        "changeRate": 30.0,
+        "reason": reason,
+        "reasonFound": found,
+        "source": "테스트" if found else "",
+        "sourceTitle": reason if found else "",
+        "sourceUrl": "https://example.test/a" if found else "",
+        "articleTitle": article,
+        "articleBody": "",
+        "weekly240Signal": signal,
+        "industry": industry,
+        "industryCode": industry_code,
+        "themeHint": {
+            "type": hint_type,
+            "key": key,
+            "name": theme_name or reason,
+            "keyword": theme_name,
+            "reason": reason,
+            "found": found,
+            "tokens": [],
+        },
+    }
 
 
 def test_unknowns_are_not_merged() -> None:
@@ -83,6 +115,137 @@ def test_title_without_dictionary_is_still_a_reason() -> None:
     assert found
     assert "방중" in reason
     assert reason.replace("…", "") in title or reason.replace("…", "")[:12] in title
+
+
+def test_similar_wording_and_sector_share_a_theme() -> None:
+    grouped = group_month(
+        [
+            _event("000001", "2026-03-03", "HBM 수요 확대"),
+            _event("000002", "2026-03-18", "파운드리 증설 소식"),
+            _event("000003", "2026-03-04", "휴머노이드 양산"),
+            _event("000004", "2026-03-19", "산업용 로봇 공급"),
+            _event("000005", "2026-03-05", "방중 수행단 일정"),
+            _event("000006", "2026-03-06", "방중 기대 속 강세"),
+            _event("000007", "2026-03-07", "삼성 기대감"),
+            _event("000008", "2026-03-07", "삼성 발표"),
+        ],
+        2026,
+        3,
+        CONFIG,
+        ["2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06", "2026-03-07", "2026-03-18", "2026-03-19"],
+    )
+    names = {theme["name"]: theme["stockCount"] for theme in grouped["themes"]}
+    assert names["AI반도체"] == 2
+    assert names["로봇"] == 2
+    assert any(theme["stockCount"] == 2 and theme["name"] == "방중" for theme in grouped["themes"])
+    assert sum(1 for theme in grouped["themes"] if "삼성" in theme["name"]) == 2
+
+
+def test_missing_news_is_inferred_not_rewritten() -> None:
+    grouped = group_month(
+        [
+            _event("000001", "2026-04-01", "양극재 공급", industry="화학", industry_code="272"),
+            _event("000002", "2026-04-01", "이유 미확인", found=False, industry="화학", industry_code="272"),
+            _event("000003", "2026-04-01", "이유 미확인", found=False, industry="제약", industry_code="261"),
+            _event("000004", "2026-04-02", "이유 미확인", found=False, industry="제약", industry_code="261"),
+            _event("000005", "2026-04-03", "이유 미확인", found=False),
+        ],
+        2026,
+        4,
+        CONFIG,
+        ["2026-04-01", "2026-04-02", "2026-04-03"],
+        history={"000009": {"key": "ship", "name": "조선"}},
+    )
+    by_name = {theme["name"]: theme for theme in grouped["themes"]}
+    battery = by_name["2차전지"]
+    assert battery["stockCount"] == 2
+    inferred = next(stock for stock in battery["stocks"] if stock["code"] == "000002")
+    assert inferred["events"][0]["inferred"] is True
+    assert inferred["events"][0]["reason"] == "이유 미확인"
+    assert inferred["events"][0]["reasonFound"] is False
+    known = next(stock for stock in battery["stocks"] if stock["code"] == "000001")
+    assert known["events"][0]["inferred"] is False
+    assert known["events"][0]["reason"] == "양극재 공급"
+    bio = by_name["바이오"]
+    assert bio["stockCount"] == 2
+    assert bio["inferredStocks"] == 2
+    assert all(event["reason"] == "이유 미확인" for stock in bio["stocks"] for event in stock["events"])
+    leftovers = [theme for theme in grouped["themes"] if theme["name"] == "이유 미확인"]
+    assert len(leftovers) == 1
+    assert leftovers[0]["stockCount"] == 1
+    assert leftovers[0]["stocks"][0]["events"][0]["inferred"] is False
+
+    later = group_month(
+        [_event("000001", "2026-05-04", "이유 미확인", found=False)],
+        2026,
+        5,
+        CONFIG,
+        ["2026-05-04"],
+        history=grouped["groundedByCode"],
+    )
+    assert later["themes"][0]["name"] == "2차전지"
+    assert later["themes"][0]["stocks"][0]["events"][0]["inferred"] is True
+    assert later["themes"][0]["stocks"][0]["events"][0]["reason"] == "이유 미확인"
+    assert later["inferredStocks"] == 1
+
+
+def test_detail_window_keeps_only_recent_reasons() -> None:
+    assert detail_cutoff("2026-11-23") == "2026-05-23"
+    assert detail_cutoff("2026-11-24") == "2026-05-24"
+    assert detail_cutoff("2026-08-31") == "2026-02-28"
+    grouped = group_month(
+        [
+            _event("000001", "2026-05-20", "갑돌 관련 로봇 공급", industry="전자장비와기기", industry_code="282"),
+            _event("000002", "2026-05-26", "산업용 로봇 공급 계약", industry="전자장비와기기", industry_code="282"),
+            _event("000003", "2026-05-27", "휴머노이드 양산 발표", industry="전자장비와기기", industry_code="282"),
+            _event("000004", "2026-05-27", "이유 미확인", found=False, industry="전자장비와기기", industry_code="282"),
+        ],
+        2026,
+        5,
+        CONFIG,
+        ["2026-05-20", "2026-05-26", "2026-05-27"],
+        detail_from="2026-05-24",
+    )
+    assert len(grouped["themes"]) == 1
+    theme = grouped["themes"][0]
+    assert theme["name"] == "로봇"
+    assert theme["id"] == "5-1"
+    assert theme["stockCount"] == 4
+    assert "갑돌" not in theme["issueSummary"]
+    assert "산업용 로봇 공급 계약" in theme["issueSummary"]
+    assert "휴머노이드 양산 발표" in theme["issueSummary"]
+    assert "만들어진" not in theme["issueSummary"]
+    by_code = {stock["code"]: stock for stock in theme["stocks"]}
+    assert by_code["000001"]["events"][0]["detail"] is False
+    assert by_code["000001"]["events"][0]["reason"] == ""
+    assert by_code["000001"]["events"][0]["reasonSummary"] == ""
+    assert by_code["000001"]["events"][0]["sourceTitle"] == ""
+    assert by_code["000002"]["events"][0]["detail"] is True
+    assert by_code["000002"]["events"][0]["reasonSummary"] == "산업용 로봇 공급 계약"
+    unknown = by_code["000004"]["events"][0]
+    assert unknown["inferred"] is True
+    assert unknown["reasonSummary"] == "이유 미확인"
+    old_only = group_month(
+        [_event("000008", "2026-01-05", "항암 임상")],
+        2026,
+        1,
+        CONFIG,
+        ["2026-01-05"],
+        detail_from="2026-05-24",
+    )
+    assert old_only["themes"][0]["issueSummary"] == ""
+    assert old_only["themes"][0]["stocks"][0]["events"][0]["reason"] == ""
+    assert old_only["themes"][0]["name"] == "바이오"
+    bare = group_month(
+        [_event("000009", "2026-06-01", "이유 미확인", found=False, industry="제약", industry_code="261")],
+        2026,
+        6,
+        CONFIG,
+        ["2026-06-01"],
+        detail_from="2026-05-24",
+    )
+    assert bare["themes"][0]["issueSummary"] == "바이오 뉴스 근거 부족"
+    assert issue_summary("방산", []) == "방산 뉴스 근거 부족"
 
 
 def test_same_theme_key_is_not_split() -> None:
@@ -253,6 +416,9 @@ if __name__ == "__main__":
     test_listing_day_can_be_ordinary_limit()
     test_title_without_dictionary_is_still_a_reason()
     test_same_theme_key_is_not_split()
+    test_detail_window_keeps_only_recent_reasons()
+    test_similar_wording_and_sector_share_a_theme()
+    test_missing_news_is_inferred_not_rewritten()
     test_unknowns_are_not_merged()
     test_exclusions()
     test_reason_is_copied()

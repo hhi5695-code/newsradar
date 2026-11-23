@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from charts import chart_payload, iso_date, weekly_signal  # noqa: E402
 from limits import exclusion_reason, is_limit_up, limit_up_status  # noqa: E402
-from themes import REASON_MISSING, group_month, has_catalyst, hint_from_article  # noqa: E402
+from themes import REASON_MISSING, detail_cutoff, group_month, has_catalyst, hint_from_article  # noqa: E402
 from vault import derive_key, purge_plaintext, read_json, require_password, write_json  # noqa: E402
 
 KST = timezone(timedelta(hours=9))
@@ -440,6 +440,8 @@ def refresh_reason(event: dict) -> dict:
     title = event.get("articleTitle") or ""
     body = event.get("articleBody") or ""
     if not title and not body:
+        if event.get("reasonFound") and event.get("reason") and event.get("reason") != REASON_MISSING:
+            return event
         event["themeHint"] = {
             "type": "unknown",
             "reason": REASON_MISSING,
@@ -554,23 +556,153 @@ def enc_path(*parts: str) -> Path:
     return SITE / "enc" / Path(*parts)
 
 
+def fetch_industry_map() -> dict[str, dict[str, str]]:
+    """Map stock code to Naver industry group. Cached under collector/.cache."""
+    path = CACHE / "industries.json"
+    if path.exists():
+        cached = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(cached, dict) and cached:
+            return cached
+    groups: list[dict] = []
+    page = 1
+    while page <= 5:
+        payload = get_json(
+            f"https://m.stock.naver.com/api/stocks/industry?page={page}&pageSize=100",
+            "https://m.stock.naver.com/",
+        )
+        batch = payload.get("groups") or []
+        groups.extend(batch)
+        total = int(payload.get("totalCount") or 0)
+        page_size = int(payload.get("pageSize") or 100)
+        if not batch or page * page_size >= total:
+            break
+        page += 1
+    mapping: dict[str, dict[str, str]] = {}
+    for index, group in enumerate(groups, start=1):
+        number = group.get("no")
+        name = str(group.get("name") or "").strip()
+        if number is None or not name:
+            continue
+        member_page = 1
+        while member_page <= 20:
+            try:
+                payload = get_json(
+                    f"https://m.stock.naver.com/api/stocks/industry/{number}?page={member_page}&pageSize=100",
+                    "https://m.stock.naver.com/",
+                )
+            except Exception as exc:  # noqa: BLE001 - one group should not stop the rest
+                print(f"업종 {name} 목록 실패: {exc}", flush=True)
+                break
+            stocks = payload.get("stocks") or []
+            for row in stocks:
+                code = str(row.get("itemCode") or "").strip()
+                if code:
+                    mapping[code] = {"industryCode": str(number), "industry": name}
+            if len(stocks) < 100:
+                break
+            member_page += 1
+        if index % 20 == 0 or index == len(groups):
+            print(f"  업종 {index}/{len(groups)} · 종목 {len(mapping)}", flush=True)
+    if mapping:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(mapping, ensure_ascii=False), encoding="utf-8")
+    return mapping
+
+
+def attach_industries(events: list[dict]) -> None:
+    try:
+        mapping = fetch_industry_map()
+    except Exception as exc:  # noqa: BLE001 - grouping still runs on news text
+        print(f"업종 목록을 받지 못했습니다. 업종 없이 테마를 나눕니다. {exc}", flush=True)
+        return
+    if not mapping:
+        print("업종 목록이 비어 있습니다. 저장된 업종만 사용합니다.", flush=True)
+        return
+    filled = 0
+    for event in events:
+        info = mapping.get(event["code"])
+        if not info:
+            continue
+        event["industry"] = info["industry"]
+        event["industryCode"] = info["industryCode"]
+        filled += 1
+    print(f"업종 표시 {filled}/{len(events)}건", flush=True)
+
+
+def _previous_theme_count(month_id: str, key: bytes) -> int | None:
+    path = enc_path("months", f"{month_id}.bin")
+    if not path.exists():
+        return None
+    payload = read_json(path, key)
+    return int(payload.get("themeCount") or len(payload.get("themes") or []))
+
+
+def _theme_report(rows: list[dict]) -> str:
+    lines = [
+        "# 테마 재분류",
+        "",
+        "같은 달 안에서 비슷한 이유와 같은 업종은 한 테마로 묶습니다. 뉴스 문장이 없는 종목은 이유 문장을 만들지 않고, 테마만 추정합니다.",
+        "",
+        "| 월 | 테마 이전 | 테마 이후 | 이유 미확인 종목 | 추정 배정 종목 | 테마를 못 정한 종목 |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    before_total = 0
+    after_total = 0
+    unknown_total = 0
+    inferred_total = 0
+    leftover_total = 0
+    for row in rows:
+        before = row["beforeThemes"]
+        before_text = "없음" if before is None else str(before)
+        if before is not None:
+            before_total += before
+        after_total += row["afterThemes"]
+        unknown_total += row["unknownStocks"]
+        inferred_total += row["inferredStocks"]
+        leftover_total += row["leftoverStocks"]
+        lines.append(
+            f"| {row['month']} | {before_text} | {row['afterThemes']} | {row['unknownStocks']} | {row['inferredStocks']} | {row['leftoverStocks']} |"
+        )
+    lines += [
+        f"| 합계 | {before_total} | {after_total} | {unknown_total} | {inferred_total} | {leftover_total} |",
+        "",
+        "테마 이전은 다시 묶기 직전 암호화 파일의 테마 수입니다. 추정 배정 종목은 이유 미확인 종목 가운데 테마에 들어간 종목 수입니다. 이유 문장은 이유 미확인 그대로입니다.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def write_outputs(events: list[dict], trading_days: list[str], config: dict, collected: list[str], key: bytes) -> None:
+    attach_industries(events)
     stored = []
     for event in events:
         event.pop("_bars", None)
         refresh_reason(event)
-        stored.append({field: value for field, value in event.items() if field != "_bars"})
+        stored.append({field: value for field, value in event.items() if not field.startswith("_")})
     purge_plaintext()
     write_json(enc_path("events.bin"), stored, key)
     months = sorted({day[:7] for day in collected})
     summaries = []
+    report_rows = []
     by_month: dict[str, list[dict]] = {}
     for event in stored:
         by_month.setdefault(event["date"][:7], []).append(event)
+    history: dict[str, dict[str, str]] = {}
+    detail_from = detail_cutoff(kst_today())
     for month_id in months:
         year, month = int(month_id[:4]), int(month_id[5:7])
         month_events = by_month.get(month_id, [])
-        payload = group_month(month_events, year, month, config, [day for day in trading_days if day[:7] == month_id])
+        before_themes = _previous_theme_count(month_id, key)
+        payload = group_month(
+            month_events,
+            year,
+            month,
+            config,
+            [day for day in trading_days if day[:7] == month_id],
+            history,
+            detail_from,
+        )
+        history.update(payload.pop("groundedByCode", {}))
         write_json(enc_path("months", f"{month_id}.bin"), payload, key)
         summaries.append(
             {
@@ -579,18 +711,36 @@ def write_outputs(events: list[dict], trading_days: list[str], config: dict, col
                 "stocks": payload["stockCount"],
                 "themes": payload["themeCount"],
                 "reasonsFound": sum(1 for event in month_events if event.get("reasonFound")),
+                "inferredStocks": payload["inferredStocks"],
             }
         )
+        report_rows.append(
+            {
+                "month": month_id,
+                "beforeThemes": before_themes,
+                "afterThemes": payload["themeCount"],
+                "unknownStocks": payload["unknownStocks"],
+                "inferredStocks": payload["inferredStocks"],
+                "leftoverStocks": payload["leftoverStocks"],
+            }
+        )
+        before_text = "없음" if before_themes is None else str(before_themes)
         print(
-            f"{month_id} 상한가 {payload['eventCount']}건 · 종목 {payload['stockCount']} · 테마 {payload['themeCount']}",
+            f"{month_id} 상한가 {payload['eventCount']}건 · 종목 {payload['stockCount']} · 테마 {before_text} -> {payload['themeCount']} · 미확인 {payload['unknownStocks']} · 추정 {payload['inferredStocks']} · 미배정 {payload['leftoverStocks']}",
             flush=True,
         )
+    report = _theme_report(report_rows)
+    report_path = ROOT / "audit" / "theme-regroup.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report, encoding="utf-8")
+    print(report, flush=True)
     latest = collected[-1] if collected else None
     manifest = {
         "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
         "source": "네이버금융",
         "startDate": config["startDate"],
         "latestTradingDay": latest,
+        "detailFrom": detail_from,
         "collectedDates": collected,
         "months": summaries,
         "config": {
@@ -725,15 +875,13 @@ def run_collect(dates: list[str], trading_days: list[str], config: dict, workers
         print("일부 종목 시세를 받지 못했습니다. collector/.cache/bar_failures.txt", flush=True)
 
 
-def rebuild(config: dict, key: bytes) -> None:
-    trading = fetch_trading_days("20251201", kst_today().replace("-", ""))
+def regroup(config: dict, key: bytes, trading: list[str]) -> None:
+    """Re-group every stored limit-up. Does not download prices again."""
     dates = collected_dates_on_disk(key)
     events = load_existing_events(set(), key)
     if not events and not dates:
         raise SystemExit("재구성할 암호화된 원본이 없습니다.")
-    end = dates[-1] if dates else kst_today()
-    apply_signals(events, end, int(config["weeklyMaPeriod"]))
-    write_charts(events, end, config, key)
+    print(f"저장된 상한가 {len(events)}건으로 테마를 다시 나눕니다.", flush=True)
     for event in events:
         event.pop("_bars", None)
     write_outputs(events, trading, config, dates, key)
@@ -797,10 +945,10 @@ def main() -> None:
         return
     password = require_password()
     key = derive_key(password)
-    if args.rebuild:
-        rebuild(config, key)
-        return
     dates, trading = resolve_dates(args, config, key)
+    if args.rebuild or (args.backfill and not dates):
+        regroup(config, key, trading)
+        return
     if not dates:
         return
     if kst_today() in dates:
