@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 REASON_MISSING = "이유 미확인"
@@ -576,6 +576,54 @@ def _infer_target(
     return None
 
 
+def detail_cutoff(run_date: str) -> str:
+    """First day of the detail window: the run date minus six calendar months."""
+    year, month, day = (int(part) for part in run_date.split("-"))
+    month -= 6
+    if month <= 0:
+        month += 12
+        year -= 1
+    if month == 12:
+        next_month = date(year + 1, 1, 1)
+    else:
+        next_month = date(year, month + 1, 1)
+    last_day = (next_month - timedelta(days=1)).day
+    return date(year, month, min(day, last_day)).isoformat()
+
+
+def _as_sentence(text: str) -> str:
+    """Keep a sourced line as one sentence. Do not add words."""
+    cleaned = " ".join(text.split()).strip(" ·")
+    if not cleaned:
+        return ""
+    if cleaned[-1] in ".!?…":
+        return cleaned
+    if cleaned.endswith("다"):
+        return cleaned + "."
+    return cleaned + "."
+
+
+def issue_summary(name: str, reasons: list[str]) -> str:
+    """One to three sentences copied from sourced reasons. No new facts."""
+    counts: Counter[str] = Counter()
+    order: list[str] = []
+    for reason in reasons:
+        cleaned = " ".join((reason or "").split()).strip()
+        if not cleaned or cleaned == REASON_MISSING:
+            continue
+        if cleaned not in counts:
+            order.append(cleaned)
+        counts[cleaned] += 1
+    if not order:
+        return f"{name} 뉴스 근거 부족"
+    ranked = sorted(order, key=lambda text: (-counts[text], order.index(text)))[:3]
+    return " ".join(sentence for sentence in (_as_sentence(text) for text in ranked) if sentence)
+
+
+def _in_detail(day: str, detail_from: str) -> bool:
+    return not detail_from or day >= detail_from
+
+
 def group_month(
     events: list[dict[str, Any]],
     year: int,
@@ -583,6 +631,7 @@ def group_month(
     config: dict[str, Any],
     trading_days: list[str],
     history: dict[str, dict[str, str]] | None = None,
+    detail_from: str = "",
 ) -> dict[str, Any]:
     """Group one month. Similar themes share a number. Missing news can be inferred."""
     ordered = sorted(events, key=lambda item: (item["date"], item["code"]))
@@ -664,6 +713,12 @@ def group_month(
     themes: list[dict[str, Any]] = []
     for rows in sorted(grouped_events.values(), key=lambda item: (item[0]["date"], item[0]["code"])):
         name, key, hint_type = _cluster_label(rows)
+        sourced = [
+            row.get("reason") or ""
+            for row in rows
+            if _in_detail(row["date"], detail_from) and row.get("reasonFound") and row.get("reason") not in {None, "", REASON_MISSING}
+        ]
+        in_window = any(_in_detail(row["date"], detail_from) for row in rows)
         chosen = {
             "id": f"{month}-{len(themes) + 1}",
             "seq": len(themes) + 1,
@@ -674,6 +729,7 @@ def group_month(
             "keywords": [],
             "stocks": {},
             "reason": next((row.get("reason") for row in rows if row.get("reasonFound")), ""),
+            "issueSummary": issue_summary(name, sourced) if in_window else "",
         }
         themes.append(chosen)
         for event in rows:
@@ -700,6 +756,7 @@ def group_month(
                 stock["dates"].append(event["date"])
             if event.get("weekly240Signal"):
                 stock["aboveWeekly240"] = True
+            event["_detail"] = _in_detail(event["date"], detail_from)
             stock["events"].append(_public_event(event))
 
     public_themes = []
@@ -721,6 +778,7 @@ def group_month(
                 "hasWeekly240": has_signal,
                 "keywords": theme["keywords"],
                 "inferredStocks": inferred_stocks,
+                "issueSummary": theme["issueSummary"],
                 "stocks": stocks,
             }
         )
@@ -733,21 +791,26 @@ def group_month(
                 theme_of_stock_event[(stock["code"], ev["date"])] = theme
     for event in ordered:
         theme = theme_of_stock_event[(event["code"], event["date"])]
+        detail = _in_detail(event["date"], detail_from)
+        sourced_reason = event.get("reason") or REASON_MISSING
         row = {
             "code": event["code"],
             "name": event["name"],
             "market": event["market"],
             "close": event["close"],
             "changeRate": event["changeRate"],
-            "reason": event.get("reason") or REASON_MISSING,
-            "reasonFound": bool(event.get("reasonFound")),
+            "detail": detail,
+            "reason": sourced_reason if detail else "",
+            "reasonSummary": sourced_reason if detail else "",
+            "reasonFound": bool(event.get("reasonFound")) if detail else False,
             "inferred": bool(event.get("inferred")),
             "source": event.get("source") or "",
-            "sourceTitle": event.get("sourceTitle") or "",
+            "sourceTitle": (event.get("sourceTitle") or "") if detail else "",
             "sourceUrl": event.get("sourceUrl") or "",
             "themeId": theme["id"],
             "themeName": theme["name"],
             "themeSize": theme["size"],
+            "issueSummary": theme["issueSummary"] if detail else "",
             "aboveWeekly240": bool(event.get("weekly240Signal")),
         }
         by_date.setdefault(event["date"], []).append(row)
@@ -763,18 +826,23 @@ def group_month(
         event.pop("_resolved", None)
         event.pop("_inferKey", None)
         event.pop("_inferName", None)
+        event.pop("_detail", None)
 
     month_id = f"{year:04d}-{month:02d}"
     days = [day for day in trading_days if day.startswith(month_id)]
     inferred_codes = {event["code"] for event in ordered if event.get("inferred")}
     unknown_codes = {event["code"] for event in ordered if not event.get("reasonFound")}
-    leftover_codes = set()
-    for theme in public_themes:
-        if theme["name"] != REASON_MISSING:
-            continue
-        for stock in theme["stocks"]:
-            if any(not event.get("reasonFound") for event in stock["events"]):
-                leftover_codes.add(stock["code"])
+    theme_name_of = {
+        (stock["code"], event["date"]): theme["name"]
+        for theme in public_themes
+        for stock in theme["stocks"]
+        for event in stock["events"]
+    }
+    leftover_codes = {
+        event["code"]
+        for event in ordered
+        if not event.get("reasonFound") and theme_name_of.get((event["code"], event["date"])) == REASON_MISSING
+    }
     return {
         "month": month_id,
         "year": year,
@@ -789,6 +857,7 @@ def group_month(
         "unknownStocks": len(unknown_codes),
         "leftoverStocks": len(leftover_codes),
         "groundedByCode": grounded_by_code,
+        "detailFrom": detail_from,
     }
 
 
@@ -820,16 +889,22 @@ def _cluster_label(rows: list[dict[str, Any]]) -> tuple[str, str | None, str]:
 
 
 def _public_event(event: dict[str, Any]) -> dict[str, Any]:
+    detail = bool(event.get("_detail", True))
+    reason = event.get("reason") or ""
+    if detail and not reason:
+        reason = REASON_MISSING
     return {
         "date": event["date"],
         "close": event["close"],
         "prevClose": event["prevClose"],
         "changeRate": event["changeRate"],
-        "reason": event.get("reason") or REASON_MISSING,
-        "reasonFound": bool(event.get("reasonFound")),
+        "detail": detail,
+        "reason": reason if detail else "",
+        "reasonSummary": reason if detail else "",
+        "reasonFound": bool(event.get("reasonFound")) if detail else False,
         "inferred": bool(event.get("inferred")),
         "source": event.get("source") or "",
-        "sourceTitle": event.get("sourceTitle") or "",
+        "sourceTitle": (event.get("sourceTitle") or "") if detail else "",
         "sourceUrl": event.get("sourceUrl") or "",
         "aboveWeekly240": bool(event.get("weekly240Signal")),
         "weekly240Above": bool(event.get("weekly240Above")),

@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from charts import chart_payload, iso_date, weekly_signal  # noqa: E402
 from limits import exclusion_reason, is_limit_up, limit_up_status  # noqa: E402
-from themes import REASON_MISSING, group_month, has_catalyst, hint_from_article  # noqa: E402
+from themes import REASON_MISSING, detail_cutoff, group_month, has_catalyst, hint_from_article  # noqa: E402
 from vault import derive_key, purge_plaintext, read_json, require_password, write_json  # noqa: E402
 
 KST = timezone(timedelta(hours=9))
@@ -688,6 +688,7 @@ def write_outputs(events: list[dict], trading_days: list[str], config: dict, col
     for event in stored:
         by_month.setdefault(event["date"][:7], []).append(event)
     history: dict[str, dict[str, str]] = {}
+    detail_from = detail_cutoff(kst_today())
     for month_id in months:
         year, month = int(month_id[:4]), int(month_id[5:7])
         month_events = by_month.get(month_id, [])
@@ -699,6 +700,7 @@ def write_outputs(events: list[dict], trading_days: list[str], config: dict, col
             config,
             [day for day in trading_days if day[:7] == month_id],
             history,
+            detail_from,
         )
         history.update(payload.pop("groundedByCode", {}))
         write_json(enc_path("months", f"{month_id}.bin"), payload, key)
@@ -738,6 +740,7 @@ def write_outputs(events: list[dict], trading_days: list[str], config: dict, col
         "source": "네이버금융",
         "startDate": config["startDate"],
         "latestTradingDay": latest,
+        "detailFrom": detail_from,
         "collectedDates": collected,
         "months": summaries,
         "config": {

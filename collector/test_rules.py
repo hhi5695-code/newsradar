@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from charts import weekly_signal
 from limits import exclusion_reason, ipo_lower, ipo_upper, is_limit_up, limit_up_status, upper_limit
-from themes import extract_reason, group_month, hint_from_article, theme_size
+from themes import detail_cutoff, extract_reason, group_month, hint_from_article, issue_summary, theme_size
 
 CONFIG = {
     "largeMinCount": 3,
@@ -189,6 +189,65 @@ def test_missing_news_is_inferred_not_rewritten() -> None:
     assert later["inferredStocks"] == 1
 
 
+def test_detail_window_keeps_only_recent_reasons() -> None:
+    assert detail_cutoff("2026-11-23") == "2026-05-23"
+    assert detail_cutoff("2026-11-24") == "2026-05-24"
+    assert detail_cutoff("2026-08-31") == "2026-02-28"
+    grouped = group_month(
+        [
+            _event("000001", "2026-05-20", "갑돌 관련 로봇 공급", industry="전자장비와기기", industry_code="282"),
+            _event("000002", "2026-05-26", "산업용 로봇 공급 계약", industry="전자장비와기기", industry_code="282"),
+            _event("000003", "2026-05-27", "휴머노이드 양산 발표", industry="전자장비와기기", industry_code="282"),
+            _event("000004", "2026-05-27", "이유 미확인", found=False, industry="전자장비와기기", industry_code="282"),
+        ],
+        2026,
+        5,
+        CONFIG,
+        ["2026-05-20", "2026-05-26", "2026-05-27"],
+        detail_from="2026-05-24",
+    )
+    assert len(grouped["themes"]) == 1
+    theme = grouped["themes"][0]
+    assert theme["name"] == "로봇"
+    assert theme["id"] == "5-1"
+    assert theme["stockCount"] == 4
+    assert "갑돌" not in theme["issueSummary"]
+    assert "산업용 로봇 공급 계약" in theme["issueSummary"]
+    assert "휴머노이드 양산 발표" in theme["issueSummary"]
+    assert "만들어진" not in theme["issueSummary"]
+    by_code = {stock["code"]: stock for stock in theme["stocks"]}
+    assert by_code["000001"]["events"][0]["detail"] is False
+    assert by_code["000001"]["events"][0]["reason"] == ""
+    assert by_code["000001"]["events"][0]["reasonSummary"] == ""
+    assert by_code["000001"]["events"][0]["sourceTitle"] == ""
+    assert by_code["000002"]["events"][0]["detail"] is True
+    assert by_code["000002"]["events"][0]["reasonSummary"] == "산업용 로봇 공급 계약"
+    unknown = by_code["000004"]["events"][0]
+    assert unknown["inferred"] is True
+    assert unknown["reasonSummary"] == "이유 미확인"
+    old_only = group_month(
+        [_event("000008", "2026-01-05", "항암 임상")],
+        2026,
+        1,
+        CONFIG,
+        ["2026-01-05"],
+        detail_from="2026-05-24",
+    )
+    assert old_only["themes"][0]["issueSummary"] == ""
+    assert old_only["themes"][0]["stocks"][0]["events"][0]["reason"] == ""
+    assert old_only["themes"][0]["name"] == "바이오"
+    bare = group_month(
+        [_event("000009", "2026-06-01", "이유 미확인", found=False, industry="제약", industry_code="261")],
+        2026,
+        6,
+        CONFIG,
+        ["2026-06-01"],
+        detail_from="2026-05-24",
+    )
+    assert bare["themes"][0]["issueSummary"] == "바이오 뉴스 근거 부족"
+    assert issue_summary("방산", []) == "방산 뉴스 근거 부족"
+
+
 def test_same_theme_key_is_not_split() -> None:
     def event(code, day, key, reason):
         return {
@@ -357,6 +416,7 @@ if __name__ == "__main__":
     test_listing_day_can_be_ordinary_limit()
     test_title_without_dictionary_is_still_a_reason()
     test_same_theme_key_is_not_split()
+    test_detail_window_keeps_only_recent_reasons()
     test_similar_wording_and_sector_share_a_theme()
     test_missing_news_is_inferred_not_rewritten()
     test_unknowns_are_not_merged()

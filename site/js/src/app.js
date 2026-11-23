@@ -141,11 +141,18 @@ function stockButton(row, extra) {
     : `<span>${escapeHtml(row.source || "")}</span>`;
   const tag = row.aboveWeekly240 ? `<span class="tag on">주봉240</span>` : "";
   const inferred = row.inferred ? `<span class="tag infer">추정</span>` : "";
+  const reasonText = row.detail === false ? "" : (row.reasonSummary || row.reason || "");
+  const reasonHtml = reasonText ? `<p class="${reasonClass}">${escapeHtml(reasonText)}</p>` : "";
   return `<li><button type="button" class="stock" data-code="${escapeHtml(row.code)}">
     <div class="row"><b>${escapeHtml(row.name)}</b><span class="mkt">${MARKET[row.market] || ""}</span>${tag}${inferred}<span class="rate">${rate(row.changeRate)}</span></div>
-    <p class="${reasonClass}">${escapeHtml(row.reason || "이유 미확인")}</p>
+    ${reasonHtml}
     <div class="meta"><span>${escapeHtml(extra || row.code)}</span>${source}</div>
   </button></li>`;
+}
+
+function issueLine(summary) {
+  if (!summary) return "";
+  return `<p class="issue"><b>이슈요약</b> ${escapeHtml(summary)}</p>`;
 }
 
 function themeHead(theme, open) {
@@ -163,6 +170,7 @@ function themeBlock(theme, rows, open) {
   const list = rows.map((row) => stockButton(row, `${row.code}`)).join("");
   return `<section class="theme">
     ${themeHead(theme, open)}
+    ${issueLine(theme.issueSummary)}
     <ul class="stocks" ${open ? "" : "hidden"}>${list}</ul>
   </section>`;
 }
@@ -175,7 +183,7 @@ function toolbar(placeholder) {
     </div>
   </div>
   <details class="note"><summary>대 · 중 · 소 기준</summary>
-    이번 달 그 테마에 들어간 상한가 종목 수입니다. 대는 3개 이상이고 그중 하나 이상이 주봉 240선 위이거나 그 선을 돌파한 경우, 중은 2개이거나 3개 이상이지만 주봉 240선 위/돌파가 없는 경우, 소는 1개입니다. 비슷한 이유와 같은 업종은 한 테마로 모이고, 다음 달에는 번호가 다시 시작됩니다. 뉴스가 없는 종목은 이유 문장을 만들지 않습니다. 테마만 추정한 경우 추정이라고 표시하며, 그 종목도 테마 수에 포함됩니다.
+    이번 달 그 테마에 들어간 상한가 종목 수입니다. 대는 3개 이상이고 그중 하나 이상이 주봉 240선 위이거나 그 선을 돌파한 경우, 중은 2개이거나 3개 이상이지만 주봉 240선 위/돌파가 없는 경우, 소는 1개입니다. 비슷한 이유와 같은 업종은 한 테마로 모이고, 다음 달에는 번호가 다시 시작됩니다. 뉴스가 없는 종목은 이유 문장을 만들지 않습니다. 테마만 추정한 경우 추정이라고 표시하며, 그 종목도 테마 수에 포함됩니다. 이슈요약과 종목별 이유 문장은 수집일부터 6개월 안의 상한가에만 나옵니다. 그 이전은 테마 이름과 종목만 나옵니다.
   </details>`;
 }
 
@@ -265,6 +273,7 @@ async function renderCalendar() {
     const list = visible.map((row) => stockButton(row, row.date)).join("");
     return `<section class="theme">
       ${themeHead(theme, false)}
+      ${issueLine(theme.issueSummary)}
       <ul class="stocks" hidden>${list}</ul>
     </section>`;
   }).join("");
@@ -281,9 +290,22 @@ async function renderCalendar() {
 }
 
 function openSheet(date, rows) {
-  const list = rows.length
-    ? `<ul class="stocks">${rows.map((row) => stockButton(row, row.themeId + " " + row.themeName)).join("")}</ul>`
-    : `<p class="empty">이 날 상한가 종목이 없습니다.</p>`;
+  const groups = new Map();
+  for (const row of rows) {
+    const key = row.themeId || row.themeName || "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  const blocks = [...groups.values()].map((group) => {
+    const sample = group[0];
+    const heading = sample.themeName
+      ? `<p class="sheet-theme"><span class="num">${escapeHtml(sample.themeId || "")}</span> ${escapeHtml(sample.themeName)}</p>`
+      : "";
+    const summary = sample.detail === false ? "" : issueLine(sample.issueSummary);
+    const list = group.map((row) => stockButton(row, row.code)).join("");
+    return `${heading}${summary}<ul class="stocks">${list}</ul>`;
+  });
+  const list = rows.length ? blocks.join("") : `<p class="empty">이 날 상한가 종목이 없습니다.</p>`;
   sheet.hidden = false;
   sheet.innerHTML = `<div class="panel" role="dialog" aria-modal="true" aria-label="${koreanDate(date)}">
     <header class="sheet-head"><div class="grow"><h3>${koreanDate(date)}</h3><p class="muted">${rows.length}건</p></div>
